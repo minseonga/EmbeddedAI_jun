@@ -607,12 +607,19 @@ class HandTrackingPipeline:
         landmarks_list = []
         detections = []
 
+        # Debug: print confidence stats every 30 frames
+        if not hasattr(self, '_debug_cnt'):
+            self._debug_cnt = 0
+        self._debug_cnt += 1
+        if self._debug_cnt % 30 == 0:
+            print(f"[DEBUG] conf max={conf.max():.3f}, mean={conf.mean():.3f}, hand_L={conf[LEFT_HAND_INDICES].mean():.3f}, hand_R={conf[RIGHT_HAND_INDICES].mean():.3f}, mouth={conf[[MOUTH_TOP, MOUTH_BOTTOM]].mean():.3f}")
+
         # Extract hand keypoints
         for hand_indices in [LEFT_HAND_INDICES, RIGHT_HAND_INDICES]:
             hand_conf = conf[hand_indices]
 
-            # Skip if low confidence
-            if hand_conf.mean() < 0.3:
+            # Skip if low confidence (lowered threshold)
+            if hand_conf.mean() < 0.1:
                 continue
 
             # Get hand landmarks
@@ -635,7 +642,7 @@ class HandTrackingPipeline:
         mouth_indices = [MOUTH_TOP, MOUTH_BOTTOM, MOUTH_LEFT, MOUTH_RIGHT]
         mouth_conf = conf[mouth_indices].mean()
 
-        if mouth_conf > 0.3:
+        if mouth_conf > 0.1:  # Lowered threshold
             # Calculate MAR (mouth aspect ratio)
             top_y = y_locs[MOUTH_TOP] * scale_y
             bottom_y = y_locs[MOUTH_BOTTOM] * scale_y
