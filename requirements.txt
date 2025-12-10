@@ -1,0 +1,4 @@
+# Core only - no ONNX
+opencv-python
+numpy
+torch
