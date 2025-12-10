@@ -1,4 +1,7 @@
-# Core only - no ONNX
+# Core
 opencv-python
 numpy
-torch
+
+# ONNX Runtime for inference
+onnxruntime  # For CPU
+# onnxruntime-gpu  # For GPU (if CUDA available)
