@@ -114,7 +114,7 @@ def prune_model(model, pruning_rate):
             total_params += module.weight.data.numel()
 
             # Apply L1 unstructured pruning to weights
-            prune.l1_unstructured(module, name='weight', amount=pruning_rate)
+            prune.ln_structured(module, name='weight', amount=pruning_rate, n=2, dim=0)
 
             # Make pruning permanent
             prune.remove(module, 'weight')
@@ -153,7 +153,7 @@ def export_pruned_models():
         try:
             # Save the pruned model
             torch.save({
-                'model': model.model.state_dict(),
+                'model': model.model, 
                 'pruning_rate': rate
             }, str(pruned_path))
 
