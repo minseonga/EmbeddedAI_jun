@@ -13,6 +13,12 @@ Run:
 
 import argparse
 import os
+
+# MediaPipe/TensorFlow 디버그 출력 숨기기
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['GLOG_minloglevel'] = '3'
+os.environ['MEDIAPIPE_DISABLE_GPU'] = '0'
+
 import sys
 import time
 import threading
@@ -238,7 +244,7 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
-    music.stop()
+    # music.stop()  # 주석 처리됨
 
 
 if __name__ == "__main__":
