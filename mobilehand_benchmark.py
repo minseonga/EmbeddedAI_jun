@@ -11,7 +11,9 @@ Pruning/Quantization 완전 지원!
 """
 
 import sys
-sys.path.insert(0, 'mobilehand_repo/code')
+from pathlib import Path
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / 'mobilehand_repo/code'))
 
 import os
 import time

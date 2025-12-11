@@ -88,8 +88,15 @@ def draw_detections(frame: np.ndarray, detections: np.ndarray, color=(255, 0, 0)
 
 class MobileHandEncoder(nn.Module):
     """MobileHand Encoder (MobileNetV3-Small)"""
+    """MobileHand Encoder (MobileNetV3-Small)"""
     def __init__(self):
         super().__init__()
+        # Fix import path for Jetson/Nano
+        import sys
+        repo_path = str(ROOT / "mobilehand_repo/code")
+        if repo_path not in sys.path:
+            sys.path.append(repo_path)
+            
         from utils_mobilenet_v3 import mobilenetv3_small
         self.encoder = mobilenetv3_small()
     
