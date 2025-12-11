@@ -173,14 +173,17 @@ def main():
     print("🖐️ MobileHand Pruning + Quantization 벤치마크")
     print("=" * 70)
     
-    # Device
-    if torch.backends.mps.is_available():
-        device = 'mps'
-    elif torch.cuda.is_available():
-        device = 'cuda'
+    # Device selection
+    if torch.cuda.is_available():
+        device = "cuda"
+        torch.backends.cudnn.benchmark = True
+        print(f"Device: cuda ({torch.cuda.get_device_name(0)})")
+    elif torch.backends.mps.is_available():
+        device = "mps"
+        print(f"Device: mps")
     else:
-        device = 'cpu'
-    print(f"Device: {device}")
+        device = "cpu"
+        print(f"Device: cpu")
     
     results = []
     

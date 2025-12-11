@@ -258,10 +258,12 @@ class HandTrackingPipeline:
         print(f"[Pipeline] Loading MobileHand keypoint ({model_desc})...")
         
         # Device
-        if torch.backends.mps.is_available() and precision == "fp32":
-            device = "mps"
-        elif torch.cuda.is_available():
+        # Device (Prioritize CUDA for Jetson)
+        if torch.cuda.is_available():
             device = "cuda"
+            torch.backends.cudnn.benchmark = True # Boost perf on Jetson
+        elif torch.backends.mps.is_available() and precision == "fp32":
+            device = "mps"
         else:
             device = "cpu"
         
