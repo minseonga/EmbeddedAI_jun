@@ -130,6 +130,7 @@ def play_sound(sound_name):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--precision', choices=['fp32', 'fp16', 'int8'], default='fp32')
+    parser.add_argument('--prune', type=float, default=0.0, help='Pruning rate (0.0-0.7)')
     parser.add_argument('--camera', type=int, default=0)
     parser.add_argument('--raise-thresh', type=float, default=0.25)
     parser.add_argument('--smile-thresh', type=float, default=0.35)
@@ -169,7 +170,7 @@ def main():
 
     # RTMPose pipeline (handles both hands and face)
     print("[Init] RTMPose (hand + face)...")
-    pipeline = HandTrackingPipeline(precision=args.precision)
+    pipeline = HandTrackingPipeline(precision=args.precision, prune_rate=args.prune)
     pipeline.print_stats()
 
     fps_hist = []

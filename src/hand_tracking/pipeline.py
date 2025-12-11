@@ -54,13 +54,25 @@ def draw_detections(frame: np.ndarray, detections: np.ndarray, color=(255, 0, 0)
 class HandTrackingPipeline:
     """Hand & Face tracking using YOLOv8 + MediaPipe."""
 
-    def __init__(self, precision: str = "fp32"):
+    def __init__(self, precision: str = "fp32", prune_rate: float = 0.0):
         self.precision = precision
+        self.prune_rate = prune_rate
 
-        print(f"[Pipeline] Loading YOLO11n-Pose hand model ({precision})...")
+        model_desc = f"{precision}"
+        if prune_rate > 0:
+            model_desc += f", pruned {int(prune_rate*100)}%"
 
-        # Select model based on precision
-        if precision == "int8":
+        print(f"[Pipeline] Loading YOLO11n-Pose hand model ({model_desc})...")
+
+        # Select model based on precision and pruning
+        if prune_rate > 0:
+            # Use pruned model
+            prune_pct = int(prune_rate * 100)
+            model_path = ROOT / f"assets/models/yolo11n_hand_pose_pruned_{prune_pct}.pt"
+            if not model_path.exists():
+                print(f"[Warning] Pruned model not found, using base model")
+                model_path = ROOT / "assets/models/yolo11n_hand_pose.pt"
+        elif precision == "int8":
             model_path = ROOT / "assets/models/yolo11n_hand_pose_int8.engine"
             if not model_path.exists():
                 print(f"[Warning] INT8 TensorRT engine not found, using FP32")
@@ -77,7 +89,7 @@ class HandTrackingPipeline:
             raise FileNotFoundError(f"Model not found: {model_path}")
 
         self.hand_model = YOLO(str(model_path))
-        print(f"[Pipeline] YOLO11n-Pose loaded (21 keypoints per hand, {precision})")
+        print(f"[Pipeline] YOLO11n-Pose loaded (21 keypoints per hand, {model_desc})")
 
         print("[Pipeline] Initializing MediaPipe Face Mesh...")
         self.face_mesh = mp_face_mesh.FaceMesh(
