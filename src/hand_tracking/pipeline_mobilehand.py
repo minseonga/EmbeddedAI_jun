@@ -83,150 +83,122 @@ def draw_detections(frame: np.ndarray, detections: np.ndarray, color=(255, 0, 0)
 
 
 # =========================================================
-# MobileHand Keypoint Model
+# MobileHand Full Model (Encoder + Regressor + MANO)
 # =========================================================
 
-class MobileHandEncoder(nn.Module):
-    """MobileHand Encoder (MobileNetV3-Small)"""
-    """MobileHand Encoder (MobileNetV3-Small)"""
-    def __init__(self):
-        super().__init__()
-        # Fix import path for Jetson/Nano
+class MobileHandHMR:
+    """
+    MobileHand Full Pipeline (HMR)
+    
+    - Encoder: MobileNetV3-Small → 576 features
+    - Regressor: 576 → MANO params (39)
+    - MANO: params → 21 keypoints
+    """
+    def __init__(self, model_path: str = None, device: str = 'cpu', dataset: str = 'freihand'):
+        self.device = device
+        
+        # Fix import path (Ensure local repo code is in path)
         import sys
+        import os
         repo_path = str(ROOT / "mobilehand_repo/code")
         if repo_path not in sys.path:
             sys.path.append(repo_path)
             
-        from utils_mobilenet_v3 import mobilenetv3_small
-        self.encoder = mobilenetv3_small()
-    
-    def forward(self, x):
-        return self.encoder(x)
-
-
-class MobileHandKeypoint:
-    """
-    MobileHand로 손 영역에서 keypoint 추출
-    
-    YOLO로 감지된 손 영역(crop)을 받아 21개 keypoint 반환
-    """
-    def __init__(self, model_path: str = None, device: str = 'cpu'):
-        self.device = device
-        self.model = MobileHandEncoder()
+        # HMR 모델 import
+        try:
+            from utils_neural_network import HMR
+        except ImportError as e:
+            print(f"[Error] Failed to import HMR from utils_neural_network")
+            raise e
+        
+        # Argparse 모사 (HMR init에 필요)
+        class Args:
+            def __init__(self, data):
+                self.data = data
+        
+        arg = Args(dataset)
+        self.model = HMR(arg)
         
         # Pretrained weight 로드
-        if model_path and Path(model_path).exists():
-            state_dict = torch.load(model_path, map_location='cpu')
-            if any(k.startswith('encoder.') for k in state_dict.keys()):
-                new_state = {k.replace('encoder.', ''): v for k, v in state_dict.items() if k.startswith('encoder.')}
-                self.model.encoder.load_state_dict(new_state, strict=False)
-            else:
-                self.model.load_state_dict(state_dict, strict=False)
+        pretrained = ROOT / f"mobilehand_repo/model/hmr_model_{dataset}_auc.pth"
+        if pretrained.exists():
+            state_dict = torch.load(pretrained, map_location='cpu')
+            self.model.load_state_dict(state_dict, strict=False)
+            print(f"[MobileHand] Loaded HMR model: {pretrained.name}")
         else:
-            pretrained = ROOT / "mobilehand_repo/model/hmr_model_freihand_auc.pth"
-            if pretrained.exists():
-                state_dict = torch.load(pretrained, map_location='cpu')
-                encoder_state = {k.replace('encoder.', ''): v for k, v in state_dict.items() if k.startswith('encoder.')}
+            print(f"[MobileHand] Warning: Pretrained not found at {pretrained}")
+        
+        # Pruned encoder 로드 (있으면 Encoder만 교체)
+        if model_path and Path(model_path).exists():
+            print(f"[MobileHand] Loading pruned encoder from {Path(model_path).name}...")
+            pruned_state = torch.load(model_path, map_location='cpu')
+            
+            # Encoder state extraction
+            encoder_state = {}
+            for k, v in pruned_state.items():
+                if k.startswith('encoder.'):
+                    encoder_state[k.replace('encoder.', '')] = v
+                elif not k.startswith('regressor.') and not k.startswith('mano.'):
+                     # If model was saved as just encoder
+                     encoder_state[k] = v
+            
+            if encoder_state:
                 self.model.encoder.load_state_dict(encoder_state, strict=False)
+                print(f"[MobileHand] Pruned encoder loaded successfully")
         
         self.model = self.model.to(device).eval()
-        self.mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
-        self.std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
     
     def predict_keypoints(self, hand_roi: np.ndarray, box: Tuple[int, int, int, int]) -> np.ndarray:
         """
-        손 영역에서 21개 keypoint 예측
-        
-        Args:
-            hand_roi: 손 영역 이미지 (crop)
-            box: (x1, y1, x2, y2) 원본 이미지에서의 좌표
-        
-        Returns:
-            keypoints: (21, 3) - x, y, confidence
+        손 영역에서 21개 keypoint 예측 (실제 손가락 움직임 반영)
         """
         x1, y1, x2, y2 = box
+        box_w, box_h = x2 - x1, y2 - y1
         roi_h, roi_w = hand_roi.shape[:2]
         
-        # Preprocess
-        img = cv2.resize(hand_roi, (224, 224))
+        # === Aspect ratio 유지하면서 224x224 정사각형으로 변환 ===
+        max_side = max(roi_h, roi_w)
+        square_img = np.zeros((max_side, max_side, 3), dtype=np.uint8)
+        
+        pad_x = (max_side - roi_w) // 2
+        pad_y = (max_side - roi_h) // 2
+        square_img[pad_y:pad_y + roi_h, pad_x:pad_x + roi_w] = hand_roi
+        
+        img = cv2.resize(square_img, (224, 224))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = img.astype(np.float32) / 255.0
-        img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(self.device)
-        img = (img - self.mean) / self.std
+        img = torch.as_tensor(img, dtype=torch.float32)
+        img = img.permute(2, 0, 1) / 255.0
         
-        # Inference (feature만 추출 - full regressor 없으므로 grid 사용)
+        # Inference
         with torch.no_grad():
-            features = self.model(img)
+            img_input = img.to(self.device).unsqueeze(0)
+            # HMR returns: keypt, joint, vert, ang, params
+            keypt, joint, vert, ang, params = self.model(img_input)
         
-        # 21개 keypoint 생성 (손 모양 패턴)
-        kpts = self._generate_hand_keypoints(x1, y1, x2 - x1, y2 - y1)
+        # keypt: [1, 21, 2] - 224x224 기준 좌표
+        keypt_np = keypt[0].cpu().numpy()
         
-        return kpts
-    
-    def _generate_hand_keypoints(self, x, y, w, h) -> np.ndarray:
-        """손 형태의 21개 keypoint 생성"""
+        # === 좌표 역변환 (224x224 -> 원본) ===
+        scale = max_side / 224.0
         kpts = np.zeros((21, 3))
         
-        cx, cy = x + w * 0.5, y + h * 0.5
-        
-        # Wrist (0) - 손목
-        kpts[0] = [cx, y + h * 0.85, 0.9]
-        
-        # 각 손가락 (4개 관절씩)
-        finger_bases = [
-            (0.25, 0.65),  # 엄지 시작
-            (0.35, 0.55),  # 검지 시작
-            (0.50, 0.50),  # 중지 시작
-            (0.65, 0.55),  # 약지 시작
-            (0.80, 0.65),  # 소지 시작
-        ]
-        
-        finger_tips_y = [0.35, 0.15, 0.10, 0.15, 0.30]  # 각 손가락 끝 y 비율
-        
-        # Thumb (1-4)
-        for i in range(4):
-            ratio = (i + 1) / 4
-            kpts[1 + i] = [
-                x + w * (0.20 + 0.10 * ratio),
-                y + h * (0.70 - 0.35 * ratio),
-                0.85
-            ]
-        
-        # Index (5-8)
-        for i in range(4):
-            ratio = (i + 1) / 4
-            kpts[5 + i] = [
-                x + w * 0.35,
-                y + h * (0.60 - 0.45 * ratio),
-                0.85
-            ]
-        
-        # Middle (9-12)
-        for i in range(4):
-            ratio = (i + 1) / 4
-            kpts[9 + i] = [
-                x + w * 0.50,
-                y + h * (0.55 - 0.45 * ratio),
-                0.85
-            ]
-        
-        # Ring (13-16)
-        for i in range(4):
-            ratio = (i + 1) / 4
-            kpts[13 + i] = [
-                x + w * 0.65,
-                y + h * (0.60 - 0.45 * ratio),
-                0.85
-            ]
-        
-        # Pinky (17-20)
-        for i in range(4):
-            ratio = (i + 1) / 4
-            kpts[17 + i] = [
-                x + w * 0.78,
-                y + h * (0.65 - 0.40 * ratio),
-                0.85
-            ]
+        for i in range(21):
+            kx_scaled = keypt_np[i, 0] * scale
+            ky_scaled = keypt_np[i, 1] * scale
+            
+            kx_unpadded = kx_scaled - pad_x
+            ky_unpadded = ky_scaled - pad_y
+            
+            # ROI 내 비율 -> 원본 좌표
+            # (Note: roi_w, roi_h could be 0 safely handled by detection check outside)
+            kx = (kx_unpadded / roi_w) * box_w + x1
+            ky = (ky_unpadded / roi_h) * box_h + y1
+            
+            # Clipping
+            kx = np.clip(kx, x1, x2)
+            ky = np.clip(ky, y1, y2)
+            
+            kpts[i] = [kx, ky, 0.9] # Confidence dummy 0.9
         
         return kpts
 
@@ -252,17 +224,12 @@ class HandTrackingPipeline:
         if prune_rate > 0:
             model_desc += f", pruned {int(prune_rate*100)}%"
 
-        # === YOLO Hand Detector ===
-        print(f"[Pipeline] Loading YOLO hand detector...")
-        yolo_path = ROOT / "assets/models/yolo11n_hand_pose.pt"
-        if not yolo_path.exists():
-            raise FileNotFoundError(f"YOLO model not found: {yolo_path}")
-        
-        self.detector = YOLO(str(yolo_path))
-        print(f"[Pipeline] YOLO detector loaded")
+        # === YOLO Hand Detector (Disabled) ===
+        self.detector = None
+        print(f"[Pipeline] YOLO detector disabled (using Center Crop)")
 
-        # === MobileHand Keypoint ===
-        print(f"[Pipeline] Loading MobileHand keypoint ({model_desc})...")
+        # === MobileHand Keypoint (Full HMR + MANO) ===
+        print(f"[Pipeline] Loading MobileHand HMR ({model_desc})...")
         
         # Device
         # Device (Prioritize CUDA for Jetson)
@@ -274,30 +241,23 @@ class HandTrackingPipeline:
         else:
             device = "cpu"
         
-        # Pruned 모델 선택
+        # Pruned 모델 선택 (Encoder Weight만 교체)
         if prune_rate > 0:
             prune_pct = int(prune_rate * 100)
             model_path = ROOT / f"assets/models/mobilehand_encoder_pruned_{prune_pct}.pt"
         else:
-            model_path = ROOT / "assets/models/mobilehand_encoder.pt"
+            # Full HMR uses internal default if None
+            model_path = None 
         
-        self.keypoint_model = MobileHandKeypoint(
-            model_path=str(model_path) if model_path.exists() else None,
+        self.keypoint_model = MobileHandHMR(
+            model_path=str(model_path) if model_path and model_path.exists() else None,
             device=device
         )
-        print(f"[Pipeline] MobileHand loaded (21 keypoints)")
+        print(f"[Pipeline] MobileHand HMR loaded (21 keypoints from MANO)")
 
-        # === MediaPipe Face ===
-        print("[Pipeline] Initializing MediaPipe Face Mesh...")
-        with suppress_stderr():
-            self.face_mesh = mp_face_mesh.FaceMesh(
-                static_image_mode=False,
-                max_num_faces=1,
-                refine_landmarks=True,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5
-            )
-        print("[Pipeline] MediaPipe Face Mesh loaded (468 keypoints)")
+        # === MediaPipe Face (Disabled for Performance) ===
+        self.face_mesh = None
+        print("[Pipeline] MediaPipe Face Mesh disabled for performance.")
 
     def process_frame(self, frame: np.ndarray) -> Tuple[List[np.ndarray], np.ndarray, float, Optional[np.ndarray]]:
         """Process frame and return hand landmarks + face info."""
@@ -308,74 +268,44 @@ class HandTrackingPipeline:
         mar = 0.0
         mouth_center = None
 
-        # === Hand Detection (YOLO) ===
-        try:
-            results = self.detector(frame, verbose=False)
+        # === Hand Detection (Center Crop Fallback) ===
+        # YOLO 제거됨 -> 화면 중앙을 ROI로 가정
+        
+        # Center Crop (60% of screen)
+        crop_size = min(h, w) * 0.6
+        cx, cy = w // 2, h // 2
+        
+        x1 = int(cx - crop_size / 2)
+        y1 = int(cy - crop_size / 2)
+        x2 = int(cx + crop_size / 2)
+        y2 = int(cy + crop_size / 2)
+        
+        # Clipping
+        x1 = max(0, x1); y1 = max(0, y1)
+        x2 = min(w, x2); y2 = min(h, y2)
+        
+        hand_roi = frame[y1:y2, x1:x2]
+        
+        # [Debug] Show Hand ROI
+        cv2.imshow("Hand ROI Input", hand_roi)
+        
+        if hand_roi.size > 0:
+            # === MobileHand Keypoint ===
+            kpts = self.keypoint_model.predict_keypoints(hand_roi, (x1, y1, x2, y2))
             
-            if len(results) > 0:
-                result = results[0]
-                
-                if result.boxes is not None and len(result.boxes) > 0:
-                    boxes = result.boxes.xyxy.cpu().numpy()
-                    confs = result.boxes.conf.cpu().numpy()
-                    
-                    for i, (box, conf) in enumerate(zip(boxes, confs)):
-                        if conf < 0.3:  # 낮은 confidence 무시
-                            continue
-                        
-                        x1, y1, x2, y2 = map(int, box)
-                        
-                        # Padding
-                        pad = int((x2 - x1) * 0.1)
-                        x1 = max(0, x1 - pad)
-                        y1 = max(0, y1 - pad)
-                        x2 = min(w, x2 + pad)
-                        y2 = min(h, y2 + pad)
-                        
-                        # Hand ROI
-                        hand_roi = frame[y1:y2, x1:x2]
-                        if hand_roi.size == 0:
-                            continue
-                        
-                        # === MobileHand Keypoint ===
-                        kpts = self.keypoint_model.predict_keypoints(hand_roi, (x1, y1, x2, y2))
-                        
-                        landmarks_list.append(kpts)
-                        detections.append(np.array([x1, y1, x2, y2, conf]))
+            # [Debug] Print min/max of keypoints relative to ROI
+            print(f"[Debug] Kpts Range: X({kpts[:,0].min():.1f}~{kpts[:,0].max():.1f}), Y({kpts[:,1].min():.1f}~{kpts[:,1].max():.1f})")
+            
+            landmarks_list.append(kpts)
+            # Fake detection box with high confidence
+            detections.append(np.array([x1, y1, x2, y2, 0.99]))
+            
+            # [Debug] Draw ROI on main frame (Blue box)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            cv2.putText(frame, "Center ROI", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,0), 1)
 
-        except Exception as e:
-            print(f"[Hand] Error: {e}")
-
-        # === Face Processing (MediaPipe) ===
-        try:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            face_results = self.face_mesh.process(frame_rgb)
-
-            if face_results.multi_face_landmarks:
-                face_landmarks = face_results.multi_face_landmarks[0]
-
-                upper = face_landmarks.landmark[MOUTH_UPPER_OUTER]
-                lower = face_landmarks.landmark[MOUTH_LOWER_OUTER]
-                left = face_landmarks.landmark[MOUTH_LEFT]
-                right = face_landmarks.landmark[MOUTH_RIGHT]
-
-                upper_px = np.array([upper.x * w, upper.y * h])
-                lower_px = np.array([lower.x * w, lower.y * h])
-                left_px = np.array([left.x * w, left.y * h])
-                right_px = np.array([right.x * w, right.y * h])
-
-                mouth_height = np.linalg.norm(upper_px - lower_px)
-                mouth_width = np.linalg.norm(left_px - right_px)
-
-                if mouth_width > 1:
-                    mar = mouth_height / mouth_width
-
-                mouth_center = (upper_px + lower_px + left_px + right_px) / 4
-
-        except Exception as e:
-            print(f"[Face] Error: {e}")
-
-        return landmarks_list, np.array(detections) if detections else np.array([]), mar, mouth_center
+        # === Face Processing (Disabled) ===
+        return landmarks_list, np.array(detections) if detections else np.array([]), 0.0, None
 
     def print_stats(self):
         print("\n" + "=" * 50)
@@ -387,6 +317,6 @@ class HandTrackingPipeline:
         print("=" * 50 + "\n")
 
     def __del__(self):
-        if hasattr(self, 'face_mesh'):
+        if getattr(self, 'face_mesh', None):
             self.face_mesh.close()
 

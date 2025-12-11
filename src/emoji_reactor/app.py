@@ -1,167 +1,53 @@
 """
-Emoji Reactor - Hand & Face Tracking
-
+Gesture Camera - Hand Tracking
+ 
 States:
-- HANDS_UP      : hand above --raise-thresh
-- SMILING       : mouth aspect ratio > --smile-thresh
-- STRAIGHT_FACE : default
-
+- CAMERA MODE:
+  - FIST: Capture photo
+  - SWIPE: Enter Gallery
+- GALLERY MODE:
+  - SWIPE LEFT/RIGHT: Navigate photos
+  - FIST: Back to Camera
+ 
 Run:
-  python app.py --no-gstreamer --camera 0   # PC/Mac
-  python app.py                              # Jetson Nano (GStreamer)
+  python app.py --camera 0
 """
-
+ 
 import argparse
 import os
-
-# MediaPipe/TensorFlow 디버그 출력 숨기기
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['GLOG_minloglevel'] = '3'
-os.environ['MEDIAPIPE_DISABLE_GPU'] = '0'
-
 import sys
 import time
-import threading
-import shutil
-import subprocess
-from pathlib import Path
-
 import cv2
 import numpy as np
-
+import datetime
+from pathlib import Path
+ 
+# Setup Paths
 ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = ROOT / "src"
 ASSETS = ROOT / "assets"
-EMOJI_DIR = ASSETS / "emojis"
-AUDIO_DIR = ASSETS / "audio"
-
+CAPTURE_DIR = ASSETS / "captures"
+ 
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
-
-from hand_tracking import HandTrackingPipeline, draw_landmarks
-
+ 
+# from hand_tracking import HandTrackingPipeline, draw_landmarks # Loaded dynamically
+from hand_tracking.gesture import GestureDetector
+ 
 WINDOW_WIDTH = 640
 WINDOW_HEIGHT = 480
-
-
-def load_emojis():
-    """Load emoji images."""
-    file_map = {
-        "SMILING": "smile.jpg",
-        "STRAIGHT_FACE": "plain.png",
-        "HANDS_UP": "air.jpg",
-    }
-
-    loaded = {}
-    for state, filename in file_map.items():
-        path = EMOJI_DIR / filename
-        img = cv2.imread(str(path))
-        if img is not None:
-            loaded[state] = cv2.resize(img, (WINDOW_WIDTH, WINDOW_HEIGHT))
-        else:
-            print(f"[Warning] Could not load {path}")
-
-    return loaded
-
-
-def is_hand_up(landmarks, frame_h, thresh):
-    """Check if wrist is above threshold."""
-    return landmarks[0, 1] / frame_h < thresh
-
-
-
-
-class BackgroundMusic(threading.Thread):
-    """Background music player that loops."""
-    def __init__(self, path):
-        super().__init__(daemon=True)
-        self.path = path
-        self._running = True
-        self._proc = None
-
-    def stop(self):
-        self._running = False
-        if self._proc:
-            try:
-                self._proc.terminate()
-            except:
-                pass
-
-    def run(self):
-        if not os.path.isfile(self.path):
-            return
-        cmd = None
-        if sys.platform == "darwin" and shutil.which("afplay"):
-            cmd = ["afplay", self.path]
-        elif shutil.which("ffplay"):
-            cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", self.path]
-        if not cmd:
-            return
-
-        while self._running:
-            try:
-                self._proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-                self._proc.wait()
-            except:
-                break
-
-
-def play_sound(sound_name):
-    """Play sound effect for emoji state change."""
-    sound_path = AUDIO_DIR / f"{sound_name}.mp3"
-    if not os.path.isfile(sound_path):
-        return
-
-    cmd = None
-    if sys.platform == "darwin" and shutil.which("afplay"):
-        cmd = ["afplay", str(sound_path)]
-    elif shutil.which("ffplay"):
-        cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", str(sound_path)]
-
-    if cmd:
-        try:
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-        except:
-            pass
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--precision', choices=['fp32', 'fp16', 'int8'], default='fp32')
-    parser.add_argument('--prune', type=float, default=0.0, help='Pruning rate (0.0-0.7)')
-    parser.add_argument('--camera', type=int, default=0)
-    parser.add_argument('--raise-thresh', type=float, default=0.25)
-    parser.add_argument('--smile-thresh', type=float, default=0.35)
-    parser.add_argument('--no-mirror', action='store_true')
-    parser.add_argument('--no-gstreamer', action='store_true')
-    args = parser.parse_args()
-
-    emojis = load_emojis()
-    blank_emoji = np.zeros((WINDOW_HEIGHT, WINDOW_WIDTH, 3), dtype=np.uint8)
-
-    # Background music
-    #BackgroundMusic(str(AUDIO_DIR / "yessir.mp3"))
-    #music.start()
-
-    def open_default_camera():
-        """Open a plain OpenCV camera (used as fallback on macOS/PC)."""
-        backend = getattr(cv2, "CAP_AVFOUNDATION", None) if sys.platform == "darwin" else getattr(cv2, "CAP_V4L2", None)
-        cap_local = cv2.VideoCapture(args.camera, backend) if backend is not None else cv2.VideoCapture(args.camera)
-        cap_local.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap_local.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        return cap_local
-
-    # Camera (prefer GStreamer, fallback to default for macOS/PC)
+ 
+def open_default_camera(cam_id=0):
+    """Open a plain OpenCV camera."""
+    backend = getattr(cv2, "CAP_AVFOUNDATION", None) if sys.platform == "darwin" else getattr(cv2, "CAP_V4L2", None)
+    cap = cv2.VideoCapture(cam_id, backend) if backend else cv2.VideoCapture(cam_id)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, WINDOW_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, WINDOW_HEIGHT)
+    return cap
+ 
+def get_camera_pipeline(cam_id=0, no_gstreamer=False):
     cap = None
-    if not args.no_gstreamer:
+    if not no_gstreamer:
         pipeline = (
             "nvarguscamerasrc sensor-id=0 sensor-mode=2 ! "
             "video/x-raw(memory:NVMM), width=640, height=480, framerate=30/1 ! "
@@ -171,81 +57,177 @@ def main():
         print("Opening camera (GStreamer)...")
         cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
         if not cap.isOpened():
-            print("GStreamer camera open failed, falling back to default camera.")
+            print("GStreamer failed. Fallback to default.")
             cap.release()
+            cap = None
+ 
+    if cap is None:
+        print(f"Opening camera {cam_id} (OpenCV)...")
+        cap = open_default_camera(cam_id)
+    
+    return cap
+ 
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--precision', choices=['fp32', 'fp16', 'int8'], default='fp32')
+    parser.add_argument('--prune', type=float, default=0.0)
+    parser.add_argument('--camera', type=int, default=0)
+    parser.add_argument('--no-mirror', action='store_true')
+    parser.add_argument('--no-gstreamer', action='store_true')
+    parser.add_argument("--method", type=str, default="mediapipe", choices=["mediapipe", "mobilehand"], help="Tracking method")
+    args = parser.parse_args()
+ 
+    if not CAPTURE_DIR.exists():
+        CAPTURE_DIR.mkdir(parents=True)
+ 
+    # Init Pipeline
+    print(f"[Init] Hand Tracking Pipeline via {args.method}...")
+    
+    if args.method == "mobilehand":
+        from hand_tracking.pipeline_mobilehand import HandTrackingPipeline, draw_landmarks
+    else:
+        from hand_tracking.pipeline_mediapipe import HandTrackingPipeline, draw_landmarks
 
-    if cap is None or not cap.isOpened():
-        print(f"Opening camera {args.camera} (OpenCV backend)...")
-        cap = open_default_camera()
-
-    if not cap.isOpened():
-        print("Cannot open camera")
-        return
-
-    cv2.namedWindow('Reactor', cv2.WINDOW_NORMAL)
-    cv2.resizeWindow('Reactor', WINDOW_WIDTH * 2, WINDOW_HEIGHT)
-
-    # RTMPose pipeline (handles both hands and face)
-    print("[Init] RTMPose (hand + face)...")
     pipeline = HandTrackingPipeline(precision=args.precision, prune_rate=args.prune)
-    pipeline.print_stats()
-
-    fps_hist = []
-    prev_state = None
-
+    detector = GestureDetector()
+ 
+    cap = get_camera_pipeline(args.camera, args.no_gstreamer)
+    if not cap.isOpened():
+        print("Failed to open camera.")
+        return
+ 
+    cv2.namedWindow('Gesture Camera', cv2.WINDOW_NORMAL)
+    cv2.resizeWindow('Gesture Camera', WINDOW_WIDTH, WINDOW_HEIGHT)
+ 
+    # State
+    MODE = "CAMERA" # CAMERA / GALLERY
+    gallery_files = []
+    gallery_idx = 0
+    flash_timer = 0
+    
+    # Message overlay
+    msg_timer = 0
+    current_msg = ""
+ 
     print("\n[Ready] Press 'q' to quit\n")
-
+ 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-
+ 
         if not args.no_mirror:
             frame = frame[:, ::-1].copy()
         frame = cv2.resize(frame, (WINDOW_WIDTH, WINDOW_HEIGHT))
-        h, w = frame.shape[:2]
-
-        # Hand & Face inference
-        t0 = time.time()
-        landmarks, detections, mar, mouth_center = pipeline.process_frame(frame)
-        fps = 1.0 / (time.time() - t0 + 1e-6)
-        fps_hist = (fps_hist + [fps])[-30:]
-
-        # State decision
-        state = "STRAIGHT_FACE"
-        if any(is_hand_up(lm, h, args.raise_thresh) for lm in landmarks):
-            state = "HANDS_UP"
-        elif mar > args.smile_thresh:
-            state = "SMILING"
-
-        # Play sound when state changes
-        if state != prev_state and prev_state is not None:
-            # Sound files should be named: HANDS_UP.mp3, SMILING.mp3, STRAIGHT_FACE.mp3
-            play_sound(state)
-        prev_state = state
-
-        # Get emoji image
-        emoji = emojis.get(state, blank_emoji)
-        emoji_char = {"HANDS_UP": "🙌", "SMILING": "😊", "STRAIGHT_FACE": "😐"}.get(state, "❓")
-
-        # Draw
-        vis = frame.copy()
-        for lm in landmarks:
-            draw_landmarks(vis, lm)
-
-        cv2.putText(vis, f"{state} {emoji_char}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(vis, f"FPS {np.mean(fps_hist):.0f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-        cv2.imshow('Reactor', np.hstack((vis, emoji)))
-
+        
+        # 1. Inference
+        landmarks_list, detections, _, _ = pipeline.process_frame(frame)
+        
+        # 2. Gesture Detection
+        gesture = detector.update(landmarks_list)
+        
+        # === MODE LOGIC ===
+        
+        if MODE == "CAMERA":
+            # Draw UI
+            cv2.putText(frame, "CAMERA MODE (Fist: Capture, Swipe: Gallery)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+            # Action
+            if gesture == "FIST":
+                # Capture
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                save_path = CAPTURE_DIR / f"cap_{timestamp}.jpg"
+                cv2.imwrite(str(save_path), frame)
+                print(f"[Captured] {save_path.name}")
+                
+                flash_timer = 5 # Flash effect frames
+                current_msg = "Captured!"
+                msg_timer = 30
+                
+            elif gesture == "SWIPE_RIGHT" or gesture == "SWIPE_LEFT":
+                # Enter Gallery
+                MODE = "GALLERY"
+                gallery_files = sorted(list(CAPTURE_DIR.glob("*.jpg")), key=os.path.getmtime)
+                if gallery_files:
+                    gallery_idx = len(gallery_files) - 1 # Show latest
+                    current_msg = "Entering Gallery"
+                    msg_timer = 30
+                else:
+                    MODE = "CAMERA" # Back to camera if no files
+                    current_msg = "No photos yet!"
+                    msg_timer = 30
+            
+            # Flash effect
+            if flash_timer > 0:
+                overlay = np.ones_like(frame) * 255
+                alpha = 0.5
+                frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+                flash_timer -= 1
+                
+        elif MODE == "GALLERY":
+            # Refresh files just in case
+            if not gallery_files:
+                gallery_files = sorted(list(CAPTURE_DIR.glob("*.jpg")), key=os.path.getmtime)
+                
+            if not gallery_files:
+                MODE = "CAMERA"
+                continue
+                
+            # Show Image
+            try:
+                img_path = str(gallery_files[gallery_idx])
+                gallery_img = cv2.imread(img_path)
+                gallery_img = cv2.resize(gallery_img, (WINDOW_WIDTH, WINDOW_HEIGHT))
+                
+                # Overlay on frame (or replace frame)
+                # Let's replace frame but keep gesture visibility (optional)
+                # Actually user wants to browse, so show the image.
+                frame = gallery_img
+            except:
+                print(f"Error loading {gallery_files[gallery_idx]}")
+                del gallery_files[gallery_idx]
+                gallery_idx = 0
+            
+            # UI
+            cv2.putText(frame, f"GALLERY {gallery_idx+1}/{len(gallery_files)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            cv2.putText(frame, "Swipe: Nav, Fist: Camera", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            
+            # Action
+            if gesture == "SWIPE_LEFT": # Previous
+                gallery_idx = (gallery_idx - 1) % len(gallery_files)
+            elif gesture == "SWIPE_RIGHT": # Next
+                gallery_idx = (gallery_idx + 1) % len(gallery_files)
+            elif gesture == "FIST":
+                MODE = "CAMERA"
+                current_msg = "Back to Camera"
+                msg_timer = 30
+        
+        # === COMMON UI ===
+        
+        # Draw Landmarks (for visual feedback even in Gallery mode if we overlay?)
+        # For Gallery mode, maybe logic of gesture detection still runs on CAMERA frame, but we show GALLERY image.
+        # But wait! 'frame' variable is overwritten in Gallery Mode above.
+        # Detection ran on 'frame' BEFORE overwrite. Correct.
+        # But visualization `draw_landmarks` needs to draw on the FINAL frame?
+        # If in Gallery Mode, drawing landmarks on top of the photo might be confusing but helpful to enable gestures.
+        # Let's draw landmarks on whatever is shown.
+        if landmarks_list:
+            for lm in landmarks_list:
+                draw_landmarks(frame, lm)
+        
+        # Message Overlay
+        if msg_timer > 0:
+            cv2.putText(frame, current_msg, (WINDOW_WIDTH//2 - 100, WINDOW_HEIGHT//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            msg_timer -= 1
+ 
+        cv2.imshow('Gesture Camera', frame)
+ 
         key = cv2.waitKey(1) & 0xFF
         if key in (ord('q'), 27):
             break
-
+ 
     cap.release()
     cv2.destroyAllWindows()
-    # music.stop()  # 주석 처리됨
-
-
+ 
 if __name__ == "__main__":
     main()
