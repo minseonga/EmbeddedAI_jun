@@ -1,0 +1,10 @@
+Model,Method,Params(M),NonZero(M),Sparsity(%),FLOPs(G),FPS,Latency(ms),Size(MB)
+Baseline,None,2.964,2.964,0.0,3.964,27.2,36.7,5.96
+L1_Unstructured_30%,L1_Unstructured,2.964,2.08,29.8,3.964,25.6,39.1,6.0
+L1_Unstructured_50%,L1_Unstructured,2.964,1.49,49.7,3.964,26.6,37.6,6.0
+L1_Unstructured_70%,L1_Unstructured,2.964,0.901,69.6,3.964,26.0,38.5,6.0
+Global_Unstructured_30%,Global_Unstructured,2.964,2.08,29.8,3.964,26.2,38.2,5.99
+Global_Unstructured_50%,Global_Unstructured,2.964,1.49,49.7,3.964,24.9,40.2,5.99
+Global_Unstructured_70%,Global_Unstructured,2.964,0.901,69.6,3.964,21.2,47.1,5.99
+L2_Structured_30%,L2_Structured,2.964,2.082,29.8,3.964,24.3,41.2,6.0
+L2_Structured_50%,L2_Structured,2.964,1.488,49.8,3.964,21.2,47.1,6.0

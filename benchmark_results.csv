@@ -1,0 +1,5 @@
+Model,Type,Params(M),NonZero_Params(M),FLOPs(G),FPS,Latency(ms),Size(MB),Prune_Rate,Precision
+Baseline,Original,2.964,2.964,3.964,21.2,47.1,5.96,0.0,FP32
+Pruned_30%,Structured_Pruning,2.964,2.964,3.964,18.3,54.6,11.56,0.3,FP32
+Pruned_50%,Structured_Pruning,2.964,2.964,3.964,18.8,53.2,11.56,0.5,FP32
+Pruned_70%,Structured_Pruning,2.964,2.964,3.964,18.7,53.3,11.56,0.7,FP32
