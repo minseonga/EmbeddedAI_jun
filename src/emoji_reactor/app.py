@@ -142,10 +142,19 @@ def main():
     blank_emoji = np.zeros((WINDOW_HEIGHT, WINDOW_WIDTH, 3), dtype=np.uint8)
 
     # Background music
-    music = BackgroundMusic(str(AUDIO_DIR / "yessir.mp3"))
-    music.start()
+    #BackgroundMusic(str(AUDIO_DIR / "yessir.mp3"))
+    #music.start()
 
-    # Camera (GStreamer for Jetson Nano)
+    def open_default_camera():
+        """Open a plain OpenCV camera (used as fallback on macOS/PC)."""
+        backend = getattr(cv2, "CAP_AVFOUNDATION", None) if sys.platform == "darwin" else getattr(cv2, "CAP_V4L2", None)
+        cap_local = cv2.VideoCapture(args.camera, backend) if backend is not None else cv2.VideoCapture(args.camera)
+        cap_local.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap_local.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        return cap_local
+
+    # Camera (prefer GStreamer, fallback to default for macOS/PC)
+    cap = None
     if not args.no_gstreamer:
         pipeline = (
             "nvarguscamerasrc sensor-id=0 sensor-mode=2 ! "
@@ -155,11 +164,13 @@ def main():
         )
         print("Opening camera (GStreamer)...")
         cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-    else:
-        print(f"Opening camera {args.camera}...")
-        cap = cv2.VideoCapture(args.camera)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        if not cap.isOpened():
+            print("GStreamer camera open failed, falling back to default camera.")
+            cap.release()
+
+    if cap is None or not cap.isOpened():
+        print(f"Opening camera {args.camera} (OpenCV backend)...")
+        cap = open_default_camera()
 
     if not cap.isOpened():
         print("Cannot open camera")
