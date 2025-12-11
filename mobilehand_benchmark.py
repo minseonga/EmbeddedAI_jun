@@ -239,53 +239,170 @@ def main():
         torch.save(pruned.state_dict(), save_pruned)
     
     # =========================================================
-    # 3. ONNX Export
+    # 3. Quantization (INT8)
     # =========================================================
-    print("\n[3] ONNX Export...")
+    print("\n[3] Quantization (INT8)...")
     
-    model.cpu().eval()
-    dummy = torch.randn(1, 3, 224, 224)
+    # 1. Measure Size (Static Quantization Conversion)
+    try:
+        # Prepare model copy
+        model_int8 = copy.deepcopy(model).cpu()
+        model_int8.eval()
+        
+        # Fuse (Optional/Hard for MobileNetV3 blocks without code change)
+        
+        # Config
+        model_int8.qconfig = torch.ao.quantization.get_default_qconfig('qnnpack')
+        torch.backends.quantized.engine = 'qnnpack'
+        
+        # Prepare
+        torch.ao.quantization.prepare(model_int8, inplace=True)
+        
+        # Calibrate
+        print("   Calibrating...")
+        with torch.no_grad():
+            for _ in range(10):
+                model_int8(torch.randn(1, 3, 224, 224))
+        
+        # Convert
+        torch.ao.quantization.convert(model_int8, inplace=True)
+        print("   Quantization done.")
+        
+        # Save & Size Check
+        torch.save(model_int8.state_dict(), MODELS_DIR / "temp_int8.pt")
+        q_size_mb = os.path.getsize(MODELS_DIR / "temp_int8.pt") / 1e6
+        os.remove(MODELS_DIR / "temp_int8.pt")
+        
+        # Attempt Inference
+        try:
+             print("   Benchmarking INT8 Speed (CPU)...")
+             q_fps, q_lat = measure_speed(model_int8, device='cpu', num_test=50)
+             q_note = "CPU Only"
+        except RuntimeError as e:
+             print(f"   ⚠️ INT8 Inference failed (likely architecture incompatibility on PyTorch CPU): {e}")
+             q_fps, q_lat = 0, 0
+             q_note = "Size Only"
+        
+        print(f"   Size: {q_size_mb:.2f}MB, FPS: {q_fps:.1f}")
+        
+        results.append({
+            'name': 'MobileHand_INT8 (PTQ)',
+            'params': q_size_mb,
+            'flops': 0,
+            'fps': q_fps,
+            'latency': q_lat,
+            'note': q_note
+        })
+        
+        # Save valid model
+        torch.save(model_int8.state_dict(), MODELS_DIR / "mobilehand_encoder_int8.pt")
+        
+    except Exception as e:
+        print(f"   ❌ Quantization failed: {e}")
+
+    # =========================================================
+    # 4. FP16 Benchmark (MPS/CUDA)
+    # =========================================================
+    if device in ['cuda', 'mps']:
+        print(f"\n[4] FP16 Benchmark ({device})...")
+        try:
+            model_fp16 = copy.deepcopy(model).half().to(device)
+            dummy_fp16 = torch.randn(1, 3, 224, 224).half().to(device)
+            
+            # Warmup & Measure
+            with torch.no_grad():
+                model_fp16(dummy_fp16)
+            
+            fp16_times = []
+            for _ in range(100):
+                t0 = time.time()
+                with torch.no_grad():
+                    model_fp16(dummy_fp16)
+                    if device == 'mps': torch.mps.synchronize()
+                    elif device == 'cuda': torch.cuda.synchronize()
+                fp16_times.append(time.time() - t0)
+                
+            fp16_lat = sum(fp16_times) / len(fp16_times) * 1000
+            fp16_fps = 1000 / fp16_lat
+            
+            print(f"   FPS: {fp16_fps:.1f} ({device})")
+            
+            results.append({
+                'name': 'MobileHand_FP16',
+                'params': params,
+                'flops': flops,
+                'fps': fp16_fps,
+                'latency': fp16_lat,
+                'note': device.upper()
+            })
+        except Exception as e:
+            print(f"   ❌ FP16 Benchmark failed: {e}")
+
+    # =========================================================
+    # 5. ONNX Export
+    # =========================================================
+    print("\n[5] ONNX Export...")
     
-    onnx_path = MODELS_DIR / "mobilehand_encoder.onnx"
-    torch.onnx.export(model, dummy, str(onnx_path),
-                     input_names=['input'], output_names=['features'],
-                     opset_version=11)
-    print(f"   Saved: {onnx_path.name}")
-    
-    # Pruned 50% ONNX
-    pruned_50 = prune_encoder(model, 0.5)
-    onnx_pruned = MODELS_DIR / "mobilehand_encoder_pruned_50.onnx"
-    torch.onnx.export(pruned_50.cpu(), dummy, str(onnx_pruned),
-                     input_names=['input'], output_names=['features'],
-                     opset_version=11)
-    print(f"   Saved: {onnx_pruned.name}")
+    try:
+        model.cpu().eval()
+        dummy = torch.randn(1, 3, 224, 224)
+        
+        onnx_path = MODELS_DIR / "mobilehand_encoder.onnx"
+        torch.onnx.export(model, dummy, str(onnx_path),
+                        input_names=['input'], output_names=['features'],
+                        opset_version=11)
+        print(f"   Saved: {onnx_path.name}")
+        
+        # Pruned 50% ONNX
+        pruned_50 = prune_encoder(model, 0.5)
+        onnx_pruned = MODELS_DIR / "mobilehand_encoder_pruned_50.onnx"
+        torch.onnx.export(pruned_50.cpu(), dummy, str(onnx_pruned),
+                        input_names=['input'], output_names=['features'],
+                        opset_version=11)
+        print(f"   Saved: {onnx_pruned.name}")
+    except Exception as e:
+        print(f"   ONNX Export Warning: {e}")
     
     # =========================================================
-    # 결과
+    # 결과 보고서
     # =========================================================
-    print("\n" + "=" * 80)
-    print(f"{'Model':<30} | {'Params(M)':<12} | {'FLOPs(G)':<12} | {'FPS':<10} | {'Latency(ms)':<12}")
-    print("-" * 80)
+    print("\n" + "=" * 100)
+    print(f"{'Model':<30} | {'Size/Params':<12} | {'FLOPs(G)':<12} | {'FPS':<10} | {'Latency(ms)':<12} | {'Note':<10}")
+    print("-" * 100)
     for r in results:
-        print(f"{r['name']:<30} | {r['params']:<12.3f} | {r['flops']:<12.3f} | {r['fps']:<10.1f} | {r['latency']:<12.1f}")
-    print("=" * 80)
+        note = r.get('note', '')
+        # Handle formatting for params vs size
+        if 'INT8' in r['name']:
+            p_str = f"{r['params']:.2f}MB"
+        else:
+            p_str = f"{r['params']:.2f}M"
+            
+        # Handle N/A FPS
+        if r['fps'] == 0:
+            fps_str = "N/A"
+            lat_str = "N/A"
+        else:
+            fps_str = f"{r['fps']:.1f}"
+            lat_str = f"{r['latency']:.1f}"
+            
+        print(f"{r['name']:<30} | {p_str:<12} | {r['flops']:<12.3f} | {fps_str:<10} | {lat_str:<12} | {note:<10}")
+    print("=" * 100)
     
     print(f"""
 ✅ 완료!
 
 📁 생성된 파일:
-   • mobilehand_encoder.pt - Pretrained encoder
-   • mobilehand_encoder_pruned_*.pt - Pruned 모델
-   • mobilehand_encoder.onnx - TensorRT용
-   • mobilehand_encoder_pruned_50.onnx - Pruned ONNX
+   • mobilehand_encoder.pt
+   • mobilehand_encoder_pruned_*.pt
+   • mobilehand_encoder_int8.pt (Quantized)
+   • mobilehand_encoder.onnx
+   • mobilehand_encoder_pruned_50.onnx
 
-🚀 Jetson TensorRT:
-   trtexec --onnx=mobilehand_encoder_pruned_50.onnx --fp16 --saveEngine=mobilehand_fp16.engine
-
-💡 장점:
-   • 이미 FreiHAND로 학습됨 (재학습 불필요!)
-   • Pruning + Quantization 100% 지원
-   • YOLO11-pose보다 가볍고 빠름
+🚀 Jetson Nano 최적화 가이드:
+   1. Pruning된 모델 (Pruned 50%)을 선택합니다.
+   2. Jetson에서 TensorRT(FP16)로 변환하여 사용합니다.
+      $ trtexec --onnx=mobilehand_encoder_pruned_50.onnx --fp16 --saveEngine=mobilehand_fp16.engine
+   3. 예상 성능: Pruning(30% Speedup) + FP16(2~3x Speedup) = 약 3~4배 성능 향상
 """)
 
 
